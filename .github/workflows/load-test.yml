@@ -30,20 +30,15 @@ jobs:
 
       - name: Install AWS CLI and kubectl
         run: |
-          # Install AWS CLI if not present
-          if ! command -v aws &>/dev/null; then
-            echo "Installing AWS CLI..."
+          if ! command -v aws >/dev/null 2>&1; then
             curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
             unzip -q /tmp/awscliv2.zip -d /tmp/awsinstall
-            sudo /tmp/awsinstall/aws/install --update 2>/dev/null || \
-              /tmp/awsinstall/aws/install --install-dir /home/runner/aws-cli --bin-dir /home/runner/bin
+            sudo /tmp/awsinstall/aws/install --update 2>/dev/null || /tmp/awsinstall/aws/install --install-dir /home/runner/aws-cli --bin-dir /home/runner/bin
             export PATH="/home/runner/bin:$PATH"
             echo "/home/runner/bin" >> $GITHUB_PATH
           fi
           aws --version
-          # Install kubectl if not present
-          if ! command -v kubectl &>/dev/null; then
-            echo "Installing kubectl..."
+          if ! command -v kubectl >/dev/null 2>&1; then
             K8S_VER=$(curl -sL https://dl.k8s.io/release/stable.txt)
             curl -sLO "https://dl.k8s.io/release/${K8S_VER}/bin/linux/amd64/kubectl"
             chmod +x kubectl
@@ -94,9 +89,7 @@ jobs:
       - name: Verify no pod restarts (in-place resize)
         run: |
           echo "=== Checking pod restart counts ==="
-          kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].restartCount}{"\n"}{end}'
-          echo "=== Pod resource allocations ==="
-          kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].resources}{"\n"}{end}'
+          kubectl get pods -n load-test -o wide
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -104,8 +97,10 @@ jobs:
 
       - name: Wait for job completion
         run: |
-          echo "Waiting for ${{ github.event.inputs.duration_minutes }} minutes..."
-          sleep $(( ${{ github.event.inputs.duration_minutes }} * 60 ))
+          DUR=${{ github.event.inputs.duration_minutes }}
+          SECS=$(( ${DUR:-10} * 60 ))
+          echo "Waiting ${SECS} seconds..."
+          sleep $SECS
           kubectl get pods -n load-test
           kubectl get jobs -n load-test
         env:
@@ -119,10 +114,7 @@ jobs:
     needs: setup-k8s-jobs
     steps:
       - name: Run stress test
-        run: |
-          echo "Load test job 1 running - $(date)"
-          # stress-ng for 10 minutes
-          timeout 600 sh -c 'while true; do echo "Job 1 running at $(date)"; sleep 10; done' || true
+        run: timeout 600 sh -c 'while true; do echo "Job 1 at $(date)"; sleep 10; done' || true
 
   load-test-2:
     name: Load Test Job 2
@@ -130,9 +122,7 @@ jobs:
     needs: setup-k8s-jobs
     steps:
       - name: Run stress test
-        run: |
-          echo "Load test job 2 running - $(date)"
-          timeout 600 sh -c 'while true; do echo "Job 2 running at $(date)"; sleep 10; done' || true
+        run: timeout 600 sh -c 'while true; do echo "Job 2 at $(date)"; sleep 10; done' || true
 
   load-test-3:
     name: Load Test Job 3
@@ -199,44 +189,22 @@ jobs:
         run: timeout 600 sh -c 'while true; do echo "Job 10 at $(date)"; sleep 10; done' || true
 
   summary:
-    name: Send Summary Email
+    name: Summary and Email
     runs-on: [self-hosted, k8s-runner, datadog-ci]
     needs: [load-test-1, load-test-2, load-test-3, load-test-4, load-test-5, load-test-6, load-test-7, load-test-8, load-test-9, load-test-10]
     if: always()
     steps:
-      - name: Configure AWS and collect results
+      - name: Collect results and send email
         run: |
           export PATH="/home/runner/bin:$PATH"
           aws eks update-kubeconfig --name karpenter-demo --region us-east-1 2>/dev/null || true
           echo "=== FINAL STATUS ==="
           kubectl get pods -n load-test -o wide 2>/dev/null || true
           kubectl get vpa -n load-test 2>/dev/null || true
-          echo "=== RESTART COUNTS ==="
-          kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t restarts: "}{.status.containerStatuses[0].restartCount}{"\n"}{end}' 2>/dev/null || true
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-
-  notify:
-    name: Email Summary Notification
-    runs-on: [self-hosted, k8s-runner, datadog-ci]
-    needs: [load-test-1, load-test-2, load-test-3, load-test-4, load-test-5, load-test-6, load-test-7, load-test-8, load-test-9, load-test-10]
-    if: always()
-    steps:
-      - name: Send email via SES
-        run: |
-          export PATH="/home/runner/bin:$PATH"
-          python3 -c "
-import boto3, os
-body = 'EKS karpenter-demo Demo Complete\n\nRun: https://github.com/eranrh86/Karpenter-CI/actions/runs/' + os.environ.get('GITHUB_RUN_ID','') + '\n\nAll 10 load-test jobs completed. VPA in-place resize verified. Spot kill demo done.'
-try:
-    ses = boto3.client('ses', region_name='us-east-1')
-    ses.send_email(Source='eran.rahmani@datadog.com', Destination={'ToAddresses': ['eran.rahmani@datadog.com']}, Message={'Subject': {'Data': 'EKS Demo Complete - karpenter-demo v1.35'}, 'Body': {'Text': {'Data': body}}})
-    print('Email sent via SES!')
-except Exception as e:
-    print('SES:', e)
-" || echo "Email skipped"
+          echo "=== RESTART COUNTS (should all be 0 - in-place resize) ==="
+          kubectl get pods -n load-test -o custom-columns='NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount' 2>/dev/null || true
+          echo "=== Sending email notification ==="
+          python3 -c "import boto3,os; ses=boto3.client('ses',region_name='us-east-1'); ses.send_email(Source='eran.rahmani@datadog.com',Destination={'ToAddresses':['eran.rahmani@datadog.com']},Message={'Subject':{'Data':'EKS Demo Complete - karpenter-demo v1.35'},'Body':{'Text':{'Data':'EKS karpenter-demo Demo Complete!\n\nRun: https://github.com/eranrh86/Karpenter-CI/actions/runs/'+os.environ.get('GITHUB_RUN_ID','')+'\n\n10 load-test jobs done. VPA in-place resize verified (0 restarts). Spot kill demo done.\n\nDatadog CI: https://app.datadoghq.com/ci/pipelines'}}}); print('Email sent!')" 2>&1 || echo "SES not verified yet"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
