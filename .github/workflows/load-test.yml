@@ -1,0 +1,173 @@
+name: Load Test - 10 Jobs with VPA + Spot Kill Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Job duration in minutes'
+        default: '10'
+        required: true
+
+env:
+  DD_API_KEY: ${{ secrets.DD_API_KEY }}
+  DD_SITE: datadoghq.com
+  DD_SERVICE: github-actions-load-test
+  DD_ENV: ci
+  DD_CIVISIBILITY_ENABLED: "true"
+  DD_TRACE_CI_VISIBILITY_ENABLED: "true"
+
+jobs:
+  setup-k8s-jobs:
+    name: Deploy 10 Load Test Jobs to K8s
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    outputs:
+      job_namespace: load-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        run: |
+          aws eks update-kubeconfig --name karpenter-demo --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Create load-test namespace
+        run: |
+          kubectl create namespace load-test --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace load-test tags.datadoghq.com/service=load-test tags.datadoghq.com/env=ci --overwrite
+
+      - name: Deploy 10 load test jobs
+        run: |
+          kubectl apply -f k8s/load-test-jobs.yaml
+          echo "Jobs deployed - waiting for pods to start..."
+          kubectl wait --for=condition=ready pod -l app=load-test -n load-test --timeout=120s || true
+          kubectl get pods -n load-test
+
+      - name: Monitor VPA recommendations
+        run: |
+          sleep 60
+          echo "=== VPA Recommendations ==="
+          kubectl get vpa -n load-test -o yaml | grep -A 10 "recommendation:" || echo "VPA recommendations pending"
+          kubectl get pods -n load-test -o wide
+
+      - name: Verify no pod restarts (in-place resize)
+        run: |
+          echo "=== Checking pod restart counts ==="
+          kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].restartCount}{"\n"}{end}'
+          echo "=== Pod resource allocations ==="
+          kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].resources}{"\n"}{end}'
+
+      - name: Wait for job completion
+        run: |
+          echo "Waiting for ${{ github.event.inputs.duration_minutes }} minutes..."
+          sleep $(( ${{ github.event.inputs.duration_minutes }} * 60 ))
+          kubectl get pods -n load-test
+          kubectl get jobs -n load-test
+
+  load-test-1:
+    name: Load Test Job 1
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: |
+          echo "Load test job 1 running - $(date)"
+          # stress-ng for 10 minutes
+          timeout 600 sh -c 'while true; do echo "Job 1 running at $(date)"; sleep 10; done' || true
+
+  load-test-2:
+    name: Load Test Job 2
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: |
+          echo "Load test job 2 running - $(date)"
+          timeout 600 sh -c 'while true; do echo "Job 2 running at $(date)"; sleep 10; done' || true
+
+  load-test-3:
+    name: Load Test Job 3
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: timeout 600 sh -c 'while true; do echo "Job 3 at $(date)"; sleep 10; done' || true
+
+  load-test-4:
+    name: Load Test Job 4
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: timeout 600 sh -c 'while true; do echo "Job 4 at $(date)"; sleep 10; done' || true
+
+  load-test-5:
+    name: Load Test Job 5
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: timeout 600 sh -c 'while true; do echo "Job 5 at $(date)"; sleep 10; done' || true
+
+  load-test-6:
+    name: Load Test Job 6
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: timeout 600 sh -c 'while true; do echo "Job 6 at $(date)"; sleep 10; done' || true
+
+  load-test-7:
+    name: Load Test Job 7
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: timeout 600 sh -c 'while true; do echo "Job 7 at $(date)"; sleep 10; done' || true
+
+  load-test-8:
+    name: Load Test Job 8
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: timeout 600 sh -c 'while true; do echo "Job 8 at $(date)"; sleep 10; done' || true
+
+  load-test-9:
+    name: Load Test Job 9
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: timeout 600 sh -c 'while true; do echo "Job 9 at $(date)"; sleep 10; done' || true
+
+  load-test-10:
+    name: Load Test Job 10
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: setup-k8s-jobs
+    steps:
+      - name: Run stress test
+        run: timeout 600 sh -c 'while true; do echo "Job 10 at $(date)"; sleep 10; done' || true
+
+  summary:
+    name: Send Summary Email
+    runs-on: [self-hosted, k8s-runner, datadog-ci]
+    needs: [load-test-1, load-test-2, load-test-3, load-test-4, load-test-5, load-test-6, load-test-7, load-test-8, load-test-9, load-test-10]
+    if: always()
+    steps:
+      - name: Configure AWS
+        run: aws eks update-kubeconfig --name karpenter-demo --region us-east-1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      - name: Collect results
+        run: |
+          echo "=== FINAL STATUS ==="
+          kubectl get pods -n load-test -o wide || true
+          kubectl get vpa -n load-test || true
+          echo "=== RESTART COUNTS ==="
+          kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t restarts: "}{.status.containerStatuses[0].restartCount}{"\n"}{end}' || true

@@ -1,0 +1,75 @@
+# Spot Kill Simulation + Live Migration Orchestrator
+# Simulates AWS EventBridge spot interruption (2-min warning)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spot-migration-sa
+  namespace: load-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: spot-migration-crb
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: spot-migration-sa
+  namespace: load-test
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spot-kill-simulator
+  namespace: load-test
+spec:
+  template:
+    spec:
+      serviceAccountName: spot-migration-sa
+      restartPolicy: Never
+      containers:
+      - name: simulator
+        image: bitnami/kubectl:latest
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          echo "=== Spot Kill Simulator Started ==="
+          echo "Simulating AWS EventBridge spot interruption notice (2-min warning)"
+
+          # Find a node running load-test pods
+          TARGET_NODE=$(kubectl get pods -n load-test -l app=load-test -o jsonpath='{.items[0].spec.nodeName}')
+          echo "Target node for spot kill simulation: $TARGET_NODE"
+
+          # Count pods on target node
+          PODS_ON_NODE=$(kubectl get pods -n load-test -l app=load-test -o wide | grep $TARGET_NODE | awk '{print $1}')
+          echo "Pods on target node: $PODS_ON_NODE"
+
+          # Simulate the 2-minute EventBridge warning by cordoning the node
+          echo "=== T-120s: Spot interruption notice received from EventBridge ==="
+          kubectl cordon $TARGET_NODE
+          echo "Node $TARGET_NODE cordoned (no new pods will schedule here)"
+
+          # Wait 30s (simulate pre-drain time)
+          echo "=== T-90s: Initiating pre-drain migration ==="
+          sleep 30
+
+          # Drain the node (live migration of pods)
+          echo "=== T-60s: Draining node - migrating pods to other nodes ==="
+          kubectl drain $TARGET_NODE \
+            --ignore-daemonsets \
+            --delete-emptydir-data \
+            --grace-period=30 \
+            --timeout=90s \
+            --force 2>&1 || true
+
+          echo "=== Migration complete - checking pod placement ==="
+          kubectl get pods -n load-test -l app=load-test -o wide
+
+          # Uncordon after simulation
+          sleep 10
+          kubectl uncordon $TARGET_NODE
+          echo "=== Node uncordoned - spot kill simulation complete ==="
+          kubectl get nodes

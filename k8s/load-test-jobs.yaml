@@ -1,0 +1,138 @@
+# 10 Load Test Jobs with VPA In-Place Resize Support
+# K8s 1.27+ InPlacePodVerticalScaling feature (stable in 1.35)
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: load-test
+  labels:
+    tags.datadoghq.com/service: load-test
+    tags.datadoghq.com/env: ci
+---
+# VPA for load-test jobs - Auto mode with in-place resize
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: load-test-vpa
+  namespace: load-test
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: load-test-workers
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: stress
+      minAllowed:
+        cpu: 100m
+        memory: 128Mi
+      maxAllowed:
+        cpu: 2000m
+        memory: 2Gi
+      controlledResources: ["memory"]  # Only auto-adjust memory
+      controlledValues: RequestsAndLimits
+---
+# Deployment of 10 stress workers (VPA needs a Deployment/StatefulSet)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-test-workers
+  namespace: load-test
+  labels:
+    app: load-test
+    tags.datadoghq.com/service: load-test
+    tags.datadoghq.com/env: ci
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: load-test
+  template:
+    metadata:
+      labels:
+        app: load-test
+        tags.datadoghq.com/service: load-test
+        tags.datadoghq.com/env: ci
+      annotations:
+        ad.datadoghq.com/stress.logs: '[{"source":"load-test","service":"load-test"}]'
+    spec:
+      # Enable in-place resize (K8s 1.27+, stable in 1.35)
+      # Containers with resizePolicy=NotRequired don't restart on resource changes
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: stress
+        image: polinux/stress
+        command: ["stress"]
+        args:
+          - "--cpu"
+          - "2"
+          - "--vm"
+          - "1"
+          - "--vm-bytes"
+          - "512M"
+          - "--timeout"
+          - "600s"
+          - "--verbose"
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        resizePolicy:
+        - resourceName: cpu
+          restartPolicy: NotRequired
+        - resourceName: memory
+          restartPolicy: NotRequired
+        env:
+        - name: DD_AGENT_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: DD_SERVICE
+          value: "load-test"
+        - name: DD_ENV
+          value: "ci"
+      tolerations:
+      - key: "karpenter.sh/do-not-disrupt"
+        operator: "Exists"
+        effect: "NoSchedule"
+      topologySpreadConstraints:
+      - maxSkew: 2
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: load-test
+---
+# DatadogPodAutoscaler for load-test - memory-focused
+apiVersion: datadoghq.com/v1alpha2
+kind: DatadogPodAutoscaler
+metadata:
+  name: load-test-autoscaler
+  namespace: load-test
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: load-test-workers
+  policy:
+    upscale:
+      strategy: Max
+    downscale:
+      strategy: Max
+  constraints:
+    minReplicas: 10
+    maxReplicas: 10
+    containers:
+    - name: stress
+      requests:
+        minAllowed:
+          cpu: 100m
+          memory: 256Mi
+        maxAllowed:
+          cpu: 2000m
+          memory: 2Gi
