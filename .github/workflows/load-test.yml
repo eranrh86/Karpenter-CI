@@ -1,6 +1,8 @@
 name: Load Test - 10 Jobs with VPA + Spot Kill Demo
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       duration_minutes:
@@ -225,40 +227,18 @@ jobs:
       - name: Send email via SES
         run: |
           export PATH="/home/runner/bin:$PATH"
-          python3 - <<'PYEOF'
-          import boto3, os, subprocess
-
-          body = f"""
-EKS karpenter-demo Demo Complete - 2026-03-07
-
-EKS v1.35 upgrade, VPA in-place resize, spot kill simulation, and GitHub Actions CI all verified.
-
-GitHub Actions Run: https://github.com/eranrh86/Karpenter-CI/actions/runs/{os.environ.get('GITHUB_RUN_ID','')}
-Datadog CI: https://app.datadoghq.com/ci/pipelines
-
-Details:
-- 10 load-test jobs ran successfully
-- VPA auto-adjusted memory (no restarts - in-place resize K8s 1.35)
-- Spot kill: ip-192-168-83-1 drained, pods migrated successfully
-- CRIU migration agents: active on all nodes
-- Runner: self-hosted in githubci namespace (ARC)
-"""
-          try:
-              ses = boto3.client("ses", region_name="us-east-1")
-              ses.send_email(
-                  Source="eran.rahmani@datadog.com",
-                  Destination={"ToAddresses": ["eran.rahmani@datadog.com"]},
-                  Message={
-                      "Subject": {"Data": "EKS Demo Complete - karpenter-demo v1.35"},
-                      "Body": {"Text": {"Data": body}}
-                  }
-              )
-              print("Email sent via SES!")
-          except Exception as e:
-              print(f"SES note: {e}")
-              print("All tasks completed - see GitHub Actions run for full results")
-          PYEOF
+          python3 -c "
+import boto3, os
+body = 'EKS karpenter-demo Demo Complete\n\nRun: https://github.com/eranrh86/Karpenter-CI/actions/runs/' + os.environ.get('GITHUB_RUN_ID','') + '\n\nAll 10 load-test jobs completed. VPA in-place resize verified. Spot kill demo done.'
+try:
+    ses = boto3.client('ses', region_name='us-east-1')
+    ses.send_email(Source='eran.rahmani@datadog.com', Destination={'ToAddresses': ['eran.rahmani@datadog.com']}, Message={'Subject': {'Data': 'EKS Demo Complete - karpenter-demo v1.35'}, 'Body': {'Text': {'Data': body}}})
+    print('Email sent via SES!')
+except Exception as e:
+    print('SES:', e)
+" || echo "Email skipped"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
