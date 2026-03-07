@@ -77,8 +77,8 @@ spec:
           - "--verbose"
         resources:
           requests:
-            cpu: 500m
-            memory: 512Mi
+            cpu: 200m
+            memory: 256Mi
           limits:
             cpu: 1000m
             memory: 1Gi
@@ -103,7 +103,7 @@ spec:
       topologySpreadConstraints:
       - maxSkew: 2
         topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: DoNotSchedule
+        whenUnsatisfiable: ScheduleAnyway
         labelSelector:
           matchLabels:
             app: load-test
@@ -115,15 +115,11 @@ metadata:
   name: load-test-autoscaler
   namespace: load-test
 spec:
+  owner: Local
   targetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: load-test-workers
-  policy:
-    upscale:
-      strategy: Max
-    downscale:
-      strategy: Max
   constraints:
     minReplicas: 10
     maxReplicas: 10
@@ -132,7 +128,7 @@ spec:
       requests:
         minAllowed:
           cpu: 100m
-          memory: 256Mi
+          memory: 128Mi
         maxAllowed:
           cpu: 2000m
           memory: 2Gi
