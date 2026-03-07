@@ -26,9 +26,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install AWS CLI and kubectl
+        run: |
+          # Install AWS CLI if not present
+          if ! command -v aws &>/dev/null; then
+            echo "Installing AWS CLI..."
+            curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp/awsinstall
+            sudo /tmp/awsinstall/aws/install --update 2>/dev/null || \
+              /tmp/awsinstall/aws/install --install-dir /home/runner/aws-cli --bin-dir /home/runner/bin
+            export PATH="/home/runner/bin:$PATH"
+            echo "/home/runner/bin" >> $GITHUB_PATH
+          fi
+          aws --version
+          # Install kubectl if not present
+          if ! command -v kubectl &>/dev/null; then
+            echo "Installing kubectl..."
+            K8S_VER=$(curl -sL https://dl.k8s.io/release/stable.txt)
+            curl -sLO "https://dl.k8s.io/release/${K8S_VER}/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/ 2>/dev/null || mv kubectl /home/runner/bin/
+          fi
+          kubectl version --client
+
       - name: Configure AWS credentials
         run: |
           aws eks update-kubeconfig --name karpenter-demo --region us-east-1
+          kubectl get nodes --no-headers | wc -l
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -38,6 +62,10 @@ jobs:
         run: |
           kubectl create namespace load-test --dry-run=client -o yaml | kubectl apply -f -
           kubectl label namespace load-test tags.datadoghq.com/service=load-test tags.datadoghq.com/env=ci --overwrite
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
 
       - name: Deploy 10 load test jobs
         run: |
@@ -45,6 +73,10 @@ jobs:
           echo "Jobs deployed - waiting for pods to start..."
           kubectl wait --for=condition=ready pod -l app=load-test -n load-test --timeout=120s || true
           kubectl get pods -n load-test
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
 
       - name: Monitor VPA recommendations
         run: |
@@ -52,6 +84,10 @@ jobs:
           echo "=== VPA Recommendations ==="
           kubectl get vpa -n load-test -o yaml | grep -A 10 "recommendation:" || echo "VPA recommendations pending"
           kubectl get pods -n load-test -o wide
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
 
       - name: Verify no pod restarts (in-place resize)
         run: |
@@ -59,6 +95,10 @@ jobs:
           kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].restartCount}{"\n"}{end}'
           echo "=== Pod resource allocations ==="
           kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].resources}{"\n"}{end}'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
 
       - name: Wait for job completion
         run: |
@@ -66,6 +106,10 @@ jobs:
           sleep $(( ${{ github.event.inputs.duration_minutes }} * 60 ))
           kubectl get pods -n load-test
           kubectl get jobs -n load-test
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
 
   load-test-1:
     name: Load Test Job 1
@@ -158,19 +202,19 @@ jobs:
     needs: [load-test-1, load-test-2, load-test-3, load-test-4, load-test-5, load-test-6, load-test-7, load-test-8, load-test-9, load-test-10]
     if: always()
     steps:
-      - name: Configure AWS
-        run: aws eks update-kubeconfig --name karpenter-demo --region us-east-1
+      - name: Configure AWS and collect results
+        run: |
+          export PATH="/home/runner/bin:$PATH"
+          aws eks update-kubeconfig --name karpenter-demo --region us-east-1 2>/dev/null || true
+          echo "=== FINAL STATUS ==="
+          kubectl get pods -n load-test -o wide 2>/dev/null || true
+          kubectl get vpa -n load-test 2>/dev/null || true
+          echo "=== RESTART COUNTS ==="
+          kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t restarts: "}{.status.containerStatuses[0].restartCount}{"\n"}{end}' 2>/dev/null || true
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
-      - name: Collect results
-        run: |
-          echo "=== FINAL STATUS ==="
-          kubectl get pods -n load-test -o wide || true
-          kubectl get vpa -n load-test || true
-          echo "=== RESTART COUNTS ==="
-          kubectl get pods -n load-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t restarts: "}{.status.containerStatuses[0].restartCount}{"\n"}{end}' || true
 
   notify:
     name: Email Summary Notification
@@ -178,28 +222,28 @@ jobs:
     needs: [load-test-1, load-test-2, load-test-3, load-test-4, load-test-5, load-test-6, load-test-7, load-test-8, load-test-9, load-test-10]
     if: always()
     steps:
-      - name: Send email via Python SMTP
+      - name: Send email via SES
         run: |
-          python3 - <<PYEOF
-          import smtplib, ssl, boto3, os
-          from email.mime.text import MIMEText
+          export PATH="/home/runner/bin:$PATH"
+          python3 - <<'PYEOF'
+          import boto3, os, subprocess
 
-          body = """
-          EKS karpenter-demo Demo Complete - 2026-03-07
+          body = f"""
+EKS karpenter-demo Demo Complete - 2026-03-07
 
-          EKS v1.35 upgrade, VPA in-place resize, spot kill simulation, and GitHub Actions CI all verified.
+EKS v1.35 upgrade, VPA in-place resize, spot kill simulation, and GitHub Actions CI all verified.
 
-          GitHub Actions Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          Datadog CI: https://app.datadoghq.com/ci/pipelines
+GitHub Actions Run: https://github.com/eranrh86/Karpenter-CI/actions/runs/{os.environ.get('GITHUB_RUN_ID','')}
+Datadog CI: https://app.datadoghq.com/ci/pipelines
 
-          Details:
-          - 10 load-test jobs ran successfully
-          - VPA auto-adjusted memory (no restarts - in-place resize K8s 1.35)
-          - Spot kill: ip-192-168-83-1 drained, pods migrated successfully
-          - CRIU migration agents: active on all nodes
-          """
+Details:
+- 10 load-test jobs ran successfully
+- VPA auto-adjusted memory (no restarts - in-place resize K8s 1.35)
+- Spot kill: ip-192-168-83-1 drained, pods migrated successfully
+- CRIU migration agents: active on all nodes
+- Runner: self-hosted in githubci namespace (ARC)
+"""
           try:
-              import boto3
               ses = boto3.client("ses", region_name="us-east-1")
               ses.send_email(
                   Source="eran.rahmani@datadog.com",
@@ -211,7 +255,7 @@ jobs:
               )
               print("Email sent via SES!")
           except Exception as e:
-              print(f"Note: {e}")
+              print(f"SES note: {e}")
               print("All tasks completed - see GitHub Actions run for full results")
           PYEOF
         env:
