@@ -1,0 +1,40 @@
+---
+# Patch DatadogAgent to route logs through Observability Pipeline Worker
+# This patches the existing 'datadog' DatadogAgent in the 'default' namespace
+apiVersion: datadoghq.com/v2alpha1
+kind: DatadogAgent
+metadata:
+  name: datadog
+  namespace: default
+spec:
+  features:
+    logCollection:
+      enabled: true
+      containerCollectAll: true
+    observabilityPipelines:
+      enabled: true
+      # Route logs to OPW - OPW will filter stock-app and forward to Flex Logs
+      httpEnabled: true
+      httpEndpoint: "http://observability-pipelines-worker.observability-pipelines.svc.cluster.local:8282"
+  override:
+    nodeAgent:
+      image:
+        tag: "7.75.0"
+      env:
+        - name: DD_AUTOSCALING_FAILOVER_ENABLED
+          value: "true"
+        - name: DD_REMOTE_CONFIGURATION_ENABLED
+          value: "true"
+        - name: DD_CONTAINER_IMAGE_ENABLED
+          value: "true"
+        # Observability Pipeline Worker endpoint for logs
+        - name: DD_OBSERVABILITY_PIPELINES_WORKER_LOGS_ENABLED
+          value: "true"
+        - name: DD_OBSERVABILITY_PIPELINES_WORKER_LOGS_URL
+          value: "http://observability-pipelines-worker.observability-pipelines.svc.cluster.local:8282"
+    clusterAgent:
+      env:
+        - name: DD_AUTOSCALING_FAILOVER_ENABLED
+          value: "true"
+        - name: DD_REMOTE_CONFIGURATION_ENABLED
+          value: "true"

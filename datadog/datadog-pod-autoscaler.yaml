@@ -1,0 +1,29 @@
+apiVersion: datadoghq.com/v1alpha2
+kind: DatadogPodAutoscaler
+metadata:
+  name: stock-backend-autoscaler
+  namespace: stock-app
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: stock-backend-v2
+  owner: Local
+  policy:
+    upscale:
+      rules:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    downscale:
+      rules:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+  objectives:
+    - type: PodResource
+      podResource:
+        name: cpu
+        value:
+          type: Utilization
+          utilization: 70

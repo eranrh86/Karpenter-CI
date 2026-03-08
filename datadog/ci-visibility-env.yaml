@@ -1,0 +1,24 @@
+# Datadog CI Visibility environment variables
+# Add these to your GitHub Actions workflow or runner deployment
+#
+# DD_API_KEY: <your-datadog-api-key>          (use GitHub secret: DD_API_KEY)
+# DD_SITE: datadoghq.com
+# DD_SERVICE: github-actions-load-test
+# DD_ENV: ci
+# DD_CIVISIBILITY_ENABLED: "true"
+# DD_TRACE_CI_VISIBILITY_ENABLED: "true"
+#
+# These are already configured in:
+#   .github/workflows/load-test.yml
+#   .github/workflows/stock-app-cicd.yml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: datadog-ci-config
+  namespace: githubci
+data:
+  DD_SITE: "datadoghq.com"
+  DD_ENV: "ci"
+  DD_CIVISIBILITY_ENABLED: "true"
+  DD_TRACE_CI_VISIBILITY_ENABLED: "true"

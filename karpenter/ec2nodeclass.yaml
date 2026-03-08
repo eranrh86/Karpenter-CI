@@ -1,0 +1,16 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  amiFamily: AL2023
+  role: KarpenterNodeRole-karpenter-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-demo
+  tags:
+    Name: karpenter-demo-node
+    karpenter.sh/discovery: karpenter-demo

@@ -1,0 +1,230 @@
+---
+# Observability Pipeline for stock-app → Datadog Flex Logs
+# Uses Vector (the engine powering Datadog Observability Pipelines) in local-config mode
+# Architecture:
+#   Datadog Agent (all nodes) → Vector Pipeline Worker (port 8282, datadog_agent source)
+#   → filter: kube_namespace=stock-app → add ddtags:storage:flex → Datadog Flex Logs
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability-pipelines
+  labels:
+    app.kubernetes.io/name: observability-pipelines
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: opw-datadog-secret
+  namespace: observability-pipelines
+type: Opaque
+stringData:
+  api-key: "<YOUR_DATADOG_API_KEY>"
+
+---
+# Vector pipeline config: accept Datadog Agent logs, filter stock-app, push to Flex Logs
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opw-pipeline-config
+  namespace: observability-pipelines
+data:
+  vector.yaml: |
+    # Datadog Observability Pipeline — stock-app → Flex Logs
+    # Vector engine with datadog_agent source + datadog_logs sink
+
+    api:
+      enabled: true
+      address: "0.0.0.0:8686"
+
+    sources:
+      datadog_agent_in:
+        type: datadog_agent
+        address: "0.0.0.0:8282"
+        acknowledgements:
+          enabled: true
+      internal_metrics_source:
+        type: internal_metrics
+
+    transforms:
+      filter_stock_app:
+        type: filter
+        inputs:
+          - datadog_agent_in
+        # Datadog Agent encodes k8s metadata in ddtags as "kube_namespace:stock-app"
+        condition: 'exists(.ddtags) && contains(string!(.ddtags), "kube_namespace:stock-app")'
+
+      tag_for_flex:
+        type: remap
+        inputs:
+          - filter_stock_app
+        source: |
+          # Tag logs for Flex Logs routing and add enrichment
+          if exists(.ddtags) {
+            tags = string!(.ddtags)
+            if !contains(tags, "storage:flex") {
+              .ddtags = tags + ",storage:flex,env:prod,pipeline:vector-opw"
+            }
+          } else {
+            .ddtags = "storage:flex,env:prod,pipeline:vector-opw,kube_namespace:stock-app"
+          }
+          # Ensure service tag is set
+          if !exists(.service) || is_null(.service) {
+            .service = "stock-app"
+          }
+
+    sinks:
+      datadog_flex_logs:
+        type: datadog_logs
+        inputs:
+          - tag_for_flex
+        default_api_key: "${DD_API_KEY}"
+        site: datadoghq.com
+        compression: gzip
+        batch:
+          max_bytes: 4250000
+          max_events: 1000
+          timeout_secs: 5
+        request:
+          concurrency: 5
+          rate_limit_num: 100
+          rate_limit_duration_secs: 1
+        healthcheck:
+          enabled: true
+
+      internal_metrics:
+        type: prometheus_exporter
+        inputs:
+          - internal_metrics_source
+        address: "0.0.0.0:9090"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: observability-pipelines-worker
+  namespace: observability-pipelines
+  labels:
+    app.kubernetes.io/name: observability-pipelines-worker
+
+---
+# Deployment: Vector pipeline worker — extra-small size (500m CPU / 512Mi RAM)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observability-pipelines-worker
+  namespace: observability-pipelines
+  labels:
+    app.kubernetes.io/name: observability-pipelines-worker
+    app.kubernetes.io/component: pipeline-worker
+    pipeline: stock-app-flex-logs
+    size: extra-small
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: observability-pipelines-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: observability-pipelines-worker
+        app.kubernetes.io/component: pipeline-worker
+        pipeline: stock-app-flex-logs
+      annotations:
+        # Exclude OPW itself from log collection to prevent loops
+        ad.datadoghq.com/observability-pipelines-worker.logs: '[{"type":"none"}]'
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: observability-pipelines-worker
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: observability-pipelines-worker
+          image: timberio/vector:0.43.1-debian
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config"
+            - "/etc/vector/vector.yaml"
+          env:
+            - name: DD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: opw-datadog-secret
+                  key: api-key
+            - name: VECTOR_LOG
+              value: "info"
+          ports:
+            - name: datadog-agent
+              containerPort: 8282
+              protocol: TCP
+            - name: prom-metrics
+              containerPort: 9090
+              protocol: TCP
+            - name: vector-api
+              containerPort: 8686
+              protocol: TCP
+          volumeMounts:
+            - name: pipeline-config
+              mountPath: /etc/vector
+              readOnly: true
+            - name: vector-data
+              mountPath: /var/lib/vector
+          # Extra-small profile: fits on smallest EKS node
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8686
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8686
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: pipeline-config
+          configMap:
+            name: opw-pipeline-config
+        - name: vector-data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observability-pipelines-worker
+  namespace: observability-pipelines
+  labels:
+    app.kubernetes.io/name: observability-pipelines-worker
+spec:
+  selector:
+    app.kubernetes.io/name: observability-pipelines-worker
+  ports:
+    - name: datadog-agent
+      port: 8282
+      targetPort: datadog-agent
+      protocol: TCP
+    - name: prom-metrics
+      port: 9090
+      targetPort: prom-metrics
+      protocol: TCP
+    - name: vector-api
+      port: 8686
+      targetPort: vector-api
+      protocol: TCP
+  type: ClusterIP

@@ -1,0 +1,25 @@
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: stock-backend-vpa
+  namespace: stock-app
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: stock-backend-v2
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: stock-backend
+        controlledResources: ["cpu", "memory"]
+        # K8s 1.35 in-place resize — pods are NOT restarted when VPA applies recommendations
+        # resizePolicy NotRequired is set on the pod spec level (see stock-app manifest)
+        controlledValues: RequestsAndLimits
+        minAllowed:
+          cpu: 10m
+          memory: 64Mi
+        maxAllowed:
+          cpu: "2"
+          memory: 1Gi
